@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using PVEDiscovery.Services;
 
 namespace PVEDiscovery.Controllers;
 
@@ -11,11 +12,13 @@ public class WeatherForecastController : ControllerBase
         "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
     };
 
+    private readonly VirtualMachineService _vmService;
     private readonly ILogger<WeatherForecastController> _logger;
-
-    public WeatherForecastController(ILogger<WeatherForecastController> logger)
+    
+    public WeatherForecastController(VirtualMachineService virtualMachineService, ILogger<WeatherForecastController> logger)
     {
         _logger = logger;
+        _vmService = virtualMachineService;
     }
 
     [HttpGet(Name = "GetWeatherForecast")]
@@ -28,5 +31,20 @@ public class WeatherForecastController : ControllerBase
             Summary = Summaries[Random.Shared.Next(Summaries.Length)]
         })
         .ToArray();
+    }
+
+    [HttpGet("Test")]
+    public async Task<object> TestAsync()
+    {
+        try
+        {
+            var x = await _vmService.GetNodesAsync();
+            return x;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+            throw;
+        }
     }
 }

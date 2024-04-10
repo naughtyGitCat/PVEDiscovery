@@ -1,7 +1,11 @@
 // // 张锐志 2023-04-24
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Security;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using PVEDiscovery.Common;
+using PVEDiscovery.Models;
 namespace PVEDiscovery.Services;
 
 public record VMReqParams
@@ -39,57 +43,6 @@ public record VMReqParams
     public bool IgnoreNotRunning { get; set; } = true;
 }
 
-public record VirtualMachineDTO
-{
-    [JsonProperty("maxdisk")]
-    public long MaxDisk { get; set; }
-
-    [JsonProperty("cpu")]
-    public long CPU { get; set; }
-
-    [JsonProperty("vmid")]
-    public long VmID { get; set; }
-
-    [JsonProperty("netout")]
-    public long NetOut { get; set; }
-
-    [JsonProperty("diskwrite")]
-    public long DiskWrite { get; set; }
-
-    [JsonProperty("diskread")]
-    public long DiskRead { get; set; }
-
-    [JsonProperty("disk")]
-    public long Disk { get; set; }
-
-    [JsonProperty("balloon_min")]
-    public long BalloonMin { get; set; }
-
-    [JsonProperty("maxmem")]
-    public long MaxMem { get; set; }
-
-    [JsonProperty("status")]
-    public string? Status { get; set; }
-
-    [JsonProperty("name")]
-    public string? Name { get; set; }
-
-    [JsonProperty("cpus")]
-    public long CPUs { get; set; }
-
-    [JsonProperty("shares")]
-    public long Shares { get; set; }
-
-    [JsonProperty("uptime")]
-    public long Uptime { get; set; }
-
-    [JsonProperty("netin")]
-    public long NetIn { get; set; }
-
-    [JsonProperty("mem")]
-    public long Mem { get; set; }
-}
-
 public record ServiceDiscoveryDTO
 {
     [JsonProperty("targets")]
@@ -114,7 +67,7 @@ public record NodeDTO
     public long MaxCPU { get; set; }
 
     [JsonProperty("id")]
-    public string? ID { get; set; }
+    public string ID { get; set; } = string.Empty;
 
     [JsonProperty("maxdisk")]
     public long MaxDisk { get; set; }
@@ -150,28 +103,99 @@ public record NodeDTO
     public long MaxMem { get; set; }
 }
 
+public record QEMU
+{
+    [JsonProperty("status", Required = Required.Always)]
+    public string? Status { get; set; }
+
+    [JsonProperty("mem", Required = Required.Always)]
+    public long Mem { get; set; }
+    
+    [JsonProperty("maxmem", Required = Required.Always)]
+    public long MemMaxBytes { get; set; }
+
+    [JsonProperty("diskread", Required = Required.Always)]
+    public long DiskRead { get; set; }
+    
+    [JsonProperty("diskwrite", Required = Required.Always)]
+    public long DiskWrite { get; set; }
+
+    [JsonProperty("netin", Required = Required.Always)]
+    public long NetIn { get; set; }
+    
+    [JsonProperty("netout", Required = Required.Always)]
+    public long NetOut { get; set; }
+
+    [JsonProperty("vmid", Required = Required.Always)]
+    public int VmId { get; set; }
+
+    [JsonProperty("disk", Required = Required.Always)]
+    public long Disk { get; set; }
+
+    [JsonProperty("maxdisk", Required = Required.Always)]
+    public long MaxDiskSize { get; set; }
+
+    [JsonProperty("cpu", Required = Required.Always)]
+    public long CPU { get; set; }
+
+    [JsonProperty("name", Required = Required.Always)]
+    public string? Name { get; set; }
+
+    [JsonProperty("shares", Required = Required.Always)]
+    public long Shares { get; set; }
+
+    [JsonProperty("uptime", Required = Required.Always)]
+    public long Uptime { get; set; }
+
+    [JsonProperty("balloon_min", Required = Required.Always)]
+    public long MemoryBalloonMinBytes { get; set; }
+
+    [JsonProperty("cpus", Required = Required.Always)]
+    public long CPUCores { get; set; }
+}
+
+public record NodeExtDTO : NodeDTO
+{
+    
+}
+
 public class VirtualMachineService : IVirtualMachineService
 {
-    private readonly HttpClient _httpClient;
     private readonly PVESettings _pveSettings;
+    private readonly HttpClientHandler _insecureHandler;
     private readonly ILogger<VirtualMachineService> _logger;
-    public VirtualMachineService(ILogger<VirtualMachineService> logger, IHttpClientFactory httpClientFactory, IOptions<PVESettings> options)
+    public VirtualMachineService(ILogger<VirtualMachineService> logger, IOptions<PVESettings> options)
     {
         _logger = logger;
         _pveSettings = options.Value;
-        _httpClient = httpClientFactory.CreateClient();
+        _insecureHandler = new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+        };
     }
 
-    private async Task<IEnumerable<NodeDTO>> GetNodesAsync()
+    public async Task<IEnumerable<NodeDTO>> GetNodesAsync()
     {
+        var handler = new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+        };
+        _logger.LogInformation("_pveSettings.Clusters: {s}", _pveSettings.Clusters);
         var ret = new List<NodeDTO>();
         foreach (var node in _pveSettings.Clusters)
         {
-            _httpClient.BaseAddress = new Uri($"https://{node.Url}");
-            var result = await _httpClient.GetAsync("/api2/json/nodes");
+            using var httpClient = new HttpClient(handler);
+            switch (node.AuthType)
+            {
+                case "Token": httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("PVEAPIToken",node.PVEAPIToken); break;
+                default: _logger.LogInformation("not implemented"); break;
+            }
+            
+            _logger.LogDebug("{node}", node);
+            var result = await httpClient.GetAsync($"https://{node.Url}/api2/json/nodes");
             if (!result.IsSuccessStatusCode)
             {
-                _logger.LogWarning("request failed");
+                _logger.LogWarning("request failed, {c},{x}",result.StatusCode, await result.Content.ReadAsStringAsync());
                 continue;
             }
             var c=await result.Content.ReadAsStringAsync();
@@ -181,14 +205,136 @@ public class VirtualMachineService : IVirtualMachineService
         return ret;
     }
 
-    private Task<object> GetVirtualMachinesAsync(string nodeID)
+    private async Task<IEnumerable<QEMU>> GetClusterNodeQEMUsAsync(PVEClusterAuth pveCluster, string pveNodeName)
     {
-        _httpClient.BaseAddress = new Uri($"https://{node.Url}");
-        var result = await _httpClient.GetAsync("/api2/json/nodes");
-        throw new NotImplementedException();
+        using var httpClient = new HttpClient(_insecureHandler);
+        switch (pveCluster.AuthType)
+        {
+            case "Token": httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("PVEAPIToken",pveCluster.PVEAPIToken); break;
+            default: _logger.LogInformation("not implemented"); break;
+        }
+        var result = await httpClient.GetAsync($"https://{pveCluster.Url}/api2/json/nodes/{pveNodeName}/qemu");
+        if (!result.IsSuccessStatusCode)
+        {
+            throw new Exception($"request failed, {result.StatusCode},{await result.Content.ReadAsStringAsync()}");
+        }
+        var c=await result.Content.ReadAsStringAsync();
+        var raw= JsonConvert.DeserializeObject<PVEStdResp<IEnumerable<QEMU>>>(c);
+        return raw!.Data is null ? Array.Empty<QEMU>() : raw.Data;
+    }
+    
+    private async Task<QEMUAgentInfo> GetQEMUAgentInfoAsync(PVEClusterAuth pveCluster, string pveNodeName, int qemuId)
+    {
+        using var httpClient = new HttpClient(_insecureHandler);
+        switch (pveCluster.AuthType)
+        {
+            case "Token": httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("PVEAPIToken",pveCluster.PVEAPIToken); break;
+            default: _logger.LogInformation("not implemented"); break;
+        }
+        var result = await httpClient.GetAsync($"https://{pveCluster.Url}/api2/json/nodes/{pveNodeName}/qemu/{qemuId}/agent/info");
+        if (!result.IsSuccessStatusCode)
+        {
+            throw new Exception($"request failed, {result.StatusCode},{await result.Content.ReadAsStringAsync()}");
+        }
+        var c = await result.Content.ReadAsStringAsync();
+        var raw = JsonConvert.DeserializeObject<PVEStdResp<QEMUAgentInfoDTO>>(c);
+        if (raw!.Data is null) throw new QEMUAgentNotEnabledException("agent not enabled");
+        return raw.Data.Result;
+    }
+    
+    private async Task<IEnumerable<QEMUNetworkInterface>> GetNetworkInterfacesAsync(PVEClusterAuth pveCluster,string pveNodeName, int qemuId)
+    {
+        var qemuAgent = await GetQEMUAgentInfoAsync(pveCluster, pveNodeName, qemuId);
+        if (qemuAgent.SupportedCommands.All(c => c.Name != "network-get-interfaces")) throw new QEMUAgentNotSupportedException("agent not support this command");
+        if (!qemuAgent.SupportedCommands.First(c=> c.Name=="network-get-interfaces").Enabled)  throw new QEMUAgentFeatureDisabledException("agent disabled this command");
+        using var httpClient = new HttpClient(_insecureHandler);
+        switch (pveCluster.AuthType)
+        {
+            case "Token": httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("PVEAPIToken",pveCluster.PVEAPIToken); break;
+            default: _logger.LogInformation("not implemented"); break;
+        }
+        var result = await httpClient.GetAsync($"https://{pveCluster.Url}/api2/json/nodes/{pveNodeName}/qemu/{qemuId}/agent/network-get-interfaces");
+        if (!result.IsSuccessStatusCode)
+        {
+            throw new Exception($"request failed, {result.StatusCode},{await result.Content.ReadAsStringAsync()}");
+        }
+        var c = await result.Content.ReadAsStringAsync();
+        var raw = JsonConvert.DeserializeObject<PVEStdResp<ResultWrapper<IEnumerable<QEMUNetworkInterface>>>>(c);
+        return raw!.Data is null ? Array.Empty<QEMUNetworkInterface>() : raw.Data!.Result;
     }
 
-    public async Task<IEnumerable<ServiceDiscoveryDTO>> GetExportersAsync(VMReqParams reqParams)
+    public async Task<string> GetHostnameAsync(PVEClusterAuth pveCluster, string pveNodeName, int qemuId)
+    {
+        var qemuAgent = await GetQEMUAgentInfoAsync(pveCluster, pveNodeName, qemuId);
+        if (qemuAgent!.SupportedCommands.All(c => c.Name != "get-host-name")) throw new QEMUAgentNotSupportedException("agent not support this command");
+        if (!qemuAgent.SupportedCommands.First(c=> c.Name=="get-host-name").Enabled)  throw new QEMUAgentFeatureDisabledException("agent disabled this command");
+        using var httpClient = new HttpClient(_insecureHandler);
+        switch (pveCluster.AuthType)
+        {
+            case "Token": httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("PVEAPIToken",pveCluster.PVEAPIToken); break;
+            default: _logger.LogInformation("not implemented"); break;
+        }
+        var result = await httpClient.GetAsync($"https://{pveCluster.Url}/api2/json/nodes/{pveNodeName}/qemu/{qemuId}/agent/get-host-name");
+        if (!result.IsSuccessStatusCode)
+        {
+            throw new Exception($"request failed, {result.StatusCode},{await result.Content.ReadAsStringAsync()}");
+        }
+        var c = await result.Content.ReadAsStringAsync();
+        var raw = JsonConvert.DeserializeObject<PVEStdResp<ResultWrapper<QEMUHostname>>>(c);
+        return raw!.Data!.Result.Hostname;
+    }
+
+    public async Task<IEnumerable<ServiceDiscoveryDTO>> GetQEMUExportersAsync(PVEClusterAuth pveCluster)
+    {
+        var hostnames = new List<string>();
+        var nodes = await GetNodesAsync();
+        foreach (var node in nodes)
+        {
+            var nodeName = node.ID.Split("id/")[1];
+            var qemus = await GetClusterNodeQEMUsAsync(pveCluster, nodeName);
+            foreach (var qemu in qemus)
+            {
+                try
+                {
+                    var hostname = await GetHostnameAsync(pveCluster, nodeName, qemu.VmId);
+                    var interfaces = await GetNetworkInterfacesAsync(pveCluster, nodeName, qemu.VmId);
+                    interfaces.Select(i=>i.IPAddress.First(ip=>ip.IPVersion=="ipv4"))
+                    hostnames.Add(hostname);
+                }
+                catch (QEMUAgentException e)
+                {
+                    _logger.LogWarning("{qemu}, {e}",e,qemu);
+                } 
+            }
+        }
+        return hostnames;
+    }
+    
+    public async Task<IEnumerable<string>> GetClusterQEMUIPv4Async(PVEClusterAuth pveCluster)
+    {
+        var hostnames = new List<string>();
+        var nodes = await GetNodesAsync();
+        foreach (var node in nodes)
+        {
+            var nodeName = node.ID.Split("id/")[1];
+            var qemus = await GetClusterNodeQEMUsAsync(pveCluster, nodeName);
+            foreach (var qemu in qemus)
+            {
+                try
+                {
+                    var hostname = await GetHostnameAsync(pveCluster, nodeName, qemu.VmId);
+                    hostnames.Add(hostname);
+                }
+                catch (QEMUAgentException e)
+                {
+                    _logger.LogWarning("{qemu}, {e}",e,qemu);
+                }
+            }
+        }
+        return hostnames;
+    }
+
+    public Task<IEnumerable<ServiceDiscoveryDTO>> GetExportersAsync(VMReqParams reqParams)
     {
         throw new NotImplementedException();
     }
