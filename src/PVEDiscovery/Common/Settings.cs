@@ -10,7 +10,16 @@ public record PVEClusterAuth
     public string Password { get; set; } = "";
 }
 
+public record Prometheus
+{
+    // node exporter expose port in the qemu instance
+    public int NodeExporterPort { get; set; }
+    // expose/proxy qemu or other metric from pve component to prom compatible metrics
+    public bool ExposeInternalMetric { get; set; }
+}
+
 public class PVESettings
 {
+    public Prometheus Prometheus { get; set; }
     public IEnumerable<PVEClusterAuth> Clusters { get; set; } = ArraySegment<PVEClusterAuth>.Empty;
 }

@@ -263,7 +263,7 @@ public class VirtualMachineService : IVirtualMachineService
         return raw!.Data is null ? Array.Empty<QEMUNetworkInterface>() : raw.Data!.Result;
     }
 
-    public async Task<string> GetHostnameAsync(PVEClusterAuth pveCluster, string pveNodeName, int qemuId)
+    private async Task<string> GetHostnameAsync(PVEClusterAuth pveCluster, string pveNodeName, int qemuId)
     {
         var qemuAgent = await GetQEMUAgentInfoAsync(pveCluster, pveNodeName, qemuId);
         if (qemuAgent!.SupportedCommands.All(c => c.Name != "get-host-name")) throw new QEMUAgentNotSupportedException("agent not support this command");
@@ -286,7 +286,7 @@ public class VirtualMachineService : IVirtualMachineService
 
     public async Task<IEnumerable<ServiceDiscoveryDTO>> GetQEMUExportersAsync(PVEClusterAuth pveCluster)
     {
-        var hostnames = new List<string>();
+        var sds = new List<ServiceDiscoveryDTO>();
         var nodes = await GetNodesAsync();
         foreach (var node in nodes)
         {
@@ -298,8 +298,31 @@ public class VirtualMachineService : IVirtualMachineService
                 {
                     var hostname = await GetHostnameAsync(pveCluster, nodeName, qemu.VmId);
                     var interfaces = await GetNetworkInterfacesAsync(pveCluster, nodeName, qemu.VmId);
-                    interfaces.Select(i=>i.IPAddress.First(ip=>ip.IPVersion=="ipv4"))
-                    hostnames.Add(hostname);
+                    sds.AddRange(from networkInterface in interfaces
+                                 from address in networkInterface.IPAddress
+                                 where address.IPVersion == "ipv4"
+                                 select new ServiceDiscoveryDTO
+                                 {
+                                     Targets = new[]
+                                     {
+                                         $"{address.Address}:{_pveSettings.Prometheus.NodeExporterPort}"
+                                     },
+                                     Labels = new Dictionary<string, string>()
+                                     {
+                                         {
+                                             "ip", address.Address
+                                         },
+                                         {
+                                             "port", $"{_pveSettings.Prometheus.NodeExporterPort}"
+                                         },
+                                         {
+                                             "hostname", hostname
+                                         },
+                                         {
+                                             "id", qemu.VmId.ToString()
+                                         }
+                                     }
+                                 });
                 }
                 catch (QEMUAgentException e)
                 {
@@ -307,31 +330,7 @@ public class VirtualMachineService : IVirtualMachineService
                 } 
             }
         }
-        return hostnames;
-    }
-    
-    public async Task<IEnumerable<string>> GetClusterQEMUIPv4Async(PVEClusterAuth pveCluster)
-    {
-        var hostnames = new List<string>();
-        var nodes = await GetNodesAsync();
-        foreach (var node in nodes)
-        {
-            var nodeName = node.ID.Split("id/")[1];
-            var qemus = await GetClusterNodeQEMUsAsync(pveCluster, nodeName);
-            foreach (var qemu in qemus)
-            {
-                try
-                {
-                    var hostname = await GetHostnameAsync(pveCluster, nodeName, qemu.VmId);
-                    hostnames.Add(hostname);
-                }
-                catch (QEMUAgentException e)
-                {
-                    _logger.LogWarning("{qemu}, {e}",e,qemu);
-                }
-            }
-        }
-        return hostnames;
+        return sds;
     }
 
     public Task<IEnumerable<ServiceDiscoveryDTO>> GetExportersAsync(VMReqParams reqParams)
